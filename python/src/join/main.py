@@ -12,6 +12,8 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
+MsgType = message_protocol.internal.MsgType
+
 
 class JoinFilter:
 
@@ -22,11 +24,37 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.partial_tops_by_client = {}
+        self.received_tops_by_client = {}
+
+    def _process_top(self, client_id, partial_top):
+        partial_tops = self.partial_tops_by_client.setdefault(client_id, [])
+        partial_tops.extend(
+            fruit_item.FruitItem(fruit, amount) for fruit, amount in partial_top
+        )
+        received_tops = self.received_tops_by_client.get(client_id, 0) + 1
+        self.received_tops_by_client[client_id] = received_tops
+        if received_tops < AGGREGATION_AMOUNT:
+            return
+
+        logging.info("Sending final top")
+        fruit_chunk = sorted(self.partial_tops_by_client.pop(client_id))[-TOP_SIZE:]
+        fruit_chunk.reverse()
+        del self.received_tops_by_client[client_id]
+        fruit_top = [(item.fruit, item.amount) for item in fruit_chunk]
+        self.output_queue.send(
+            message_protocol.internal.serialize([MsgType.TOP, client_id, fruit_top])
+        )
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+        [msg_type, client_id, *payload] = message_protocol.internal.deserialize(
+            message
+        )
+        if msg_type == MsgType.TOP:
+            self._process_top(client_id, *payload)
+        else:
+            logging.error(f"Unexpected message type: {msg_type}")
         ack()
 
     def start(self):

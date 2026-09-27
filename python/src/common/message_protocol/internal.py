@@ -1,5 +1,10 @@
 import json
 
+class MsgType:
+    DATA = 1
+    EOF = 2
+    TOP = 3
+
 
 def serialize(message):
     return json.dumps(message).encode("utf-8")
