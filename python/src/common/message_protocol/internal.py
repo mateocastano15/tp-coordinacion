@@ -4,6 +4,7 @@ class MsgType:
     DATA = 1
     EOF = 2
     TOP = 3
+    LATE_EOF = 4
 
 
 def serialize(message):

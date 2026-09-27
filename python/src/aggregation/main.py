@@ -26,18 +26,51 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruit_top_by_client = {}
+        self.records_by_client = {}
+        self.total_records_by_client = {}
+        self.sum_eofs_by_client = {}
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
-                fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(fruit, amount)
+                updated_fruit_item = fruit_top.pop(i) + fruit_item.FruitItem(
+                    fruit, amount
+                )
+                bisect.insort(fruit_top, updated_fruit_item)
                 return
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
-    def _process_eof(self, client_id):
+    def _add_records(self, client_id, records):
+        self.records_by_client[client_id] = (
+            self.records_by_client.get(client_id, 0) + records
+        )
+
+    def _process_eof(self, client_id, records, total_records):
         logging.info("Received EOF")
+        self.sum_eofs_by_client[client_id] = (
+            self.sum_eofs_by_client.get(client_id, 0) + 1
+        )
+        self.total_records_by_client[client_id] = total_records
+        self._add_records(client_id, records)
+        self._send_top_if_finished(client_id)
+
+    def _process_late_eof(self, client_id, records):
+        logging.info("Received late EOF")
+        self._add_records(client_id, records)
+        self._send_top_if_finished(client_id)
+
+    def _send_top_if_finished(self, client_id):
+        if self.sum_eofs_by_client.get(client_id, 0) < SUM_AMOUNT:
+            return
+        if self.records_by_client[client_id] < self.total_records_by_client[client_id]:
+            return
+
+        logging.info("Sending top")
+        self.sum_eofs_by_client.pop(client_id)
+        self.records_by_client.pop(client_id)
+        self.total_records_by_client.pop(client_id)
         fruit_chunk = self.fruit_top_by_client.pop(client_id, [])[-TOP_SIZE:]
         fruit_chunk.reverse()
         fruit_top = list(
@@ -58,7 +91,9 @@ class AggregationFilter:
         if msg_type == MsgType.DATA:
             self._process_data(client_id, *payload)
         elif msg_type == MsgType.EOF:
-            self._process_eof(client_id)
+            self._process_eof(client_id, *payload)
+        elif msg_type == MsgType.LATE_EOF:
+            self._process_late_eof(client_id, *payload)
         else:
             logging.error(f"Unexpected message type: {msg_type}")
         ack()
