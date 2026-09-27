@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -26,6 +27,7 @@ class JoinFilter:
         )
         self.partial_tops_by_client = {}
         self.received_tops_by_client = {}
+        self.sigterm_received = False
 
     def _process_top(self, client_id, partial_top):
         partial_tops = self.partial_tops_by_client.setdefault(client_id, [])
@@ -57,13 +59,34 @@ class JoinFilter:
             logging.error(f"Unexpected message type: {msg_type}")
         ack()
 
+    def handle_sigterm(self, signum, frame):
+        logging.info("SIGTERM received")
+        self.sigterm_received = True
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error stopping consumption: {e}")
+
+    def close(self):
+        for connection in [self.input_queue, self.output_queue]:
+            try:
+                connection.close()
+            except Exception as e:
+                logging.error(f"Error closing connection: {e}")
+
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        try:
+            if not self.sigterm_received:
+                self.input_queue.start_consuming(self.process_messsage)
+        finally:
+            self.close()
+        logging.info("Join stopped")
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
+    signal.signal(signal.SIGTERM, join_filter.handle_sigterm)
     join_filter.start()
 
     return 0

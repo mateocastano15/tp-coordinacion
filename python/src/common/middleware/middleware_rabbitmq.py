@@ -79,7 +79,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         self._assert_connected()
 
         try:
-            self._channel.stop_consuming(self._consumer_tag)
+            self._connection.add_callback_threadsafe(self._stop_consuming_now)
         except pika.exceptions.AMQPConnectionError as e:
             raise MessageMiddlewareDisconnectedError(
                 f"Se perdió la conexión con el middleware al detener el consumo: {e}"
@@ -88,6 +88,10 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
             raise MessageMiddlewareMessageError(
                 f"Error deteniendo el consumo de la cola '{self._queue_name}': {e}"
             ) from e
+
+    def _stop_consuming_now(self):
+        if self._consumer_tag is not None:
+            self._channel.stop_consuming(self._consumer_tag)
 
     def send(self, message):
         self._assert_connected()
@@ -228,7 +232,7 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         self._assert_connected()
 
         try:
-            self._channel.stop_consuming(self._consumer_tag)
+            self._connection.add_callback_threadsafe(self._stop_consuming_now)
         except pika.exceptions.AMQPConnectionError as e:
             raise MessageMiddlewareDisconnectedError(
                 f"Se perdió la conexión con el middleware al detener el consumo: {e}"
@@ -237,6 +241,10 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             raise MessageMiddlewareMessageError(
                 f"Error deteniendo el consumo del exchange '{self._exchange_name}': {e}"
             ) from e
+
+    def _stop_consuming_now(self):
+        if self._consumer_tag is not None:
+            self._channel.stop_consuming(self._consumer_tag)
 
     def send(self, message):
         self._assert_connected()

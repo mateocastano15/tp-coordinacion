@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import threading
 import zlib
 
@@ -28,6 +29,14 @@ def build_data_output_exchanges():
     return data_output_exchanges
 
 
+def close_connections(connections):
+    for connection in connections:
+        try:
+            connection.close()
+        except Exception as e:
+            logging.error(f"Error closing connection: {e}")
+
+
 class SumFilter:
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -39,6 +48,12 @@ class SumFilter:
             [f"{SUM_PREFIX}_{i}" for i in range(SUM_AMOUNT)],
         )
         self.data_output_exchanges = build_data_output_exchanges()
+        self.control_input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_PREFIX}_{ID}"]
+        )
+        self.control_data_output_exchanges = build_data_output_exchanges()
+        self.control_thread = threading.Thread(target=self._consume_control_messages)
+        self.sigterm_received = False
         self.lock = threading.Lock()
         self.amount_by_fruit_by_client = {}
         self.records_by_client = {}
@@ -122,7 +137,7 @@ class SumFilter:
             self._forget_finished_clients()
         ack()
 
-    def process_control_message(self, message, ack, data_output_exchanges):
+    def process_control_message(self, message, ack, nack):
         [msg_type, client_id, total_records] = message_protocol.internal.deserialize(
             message
         )
@@ -135,35 +150,65 @@ class SumFilter:
             amount_by_fruit, records = self._pop_client(client_id)
             self.finished_clients[client_id] = self.processed_messages
 
-        self._send_partial_sums(client_id, amount_by_fruit, data_output_exchanges)
+        self._send_partial_sums(
+            client_id, amount_by_fruit, self.control_data_output_exchanges
+        )
         logging.info(f"Broadcasting EOF message")
         self._broadcast(
-            [MsgType.EOF, client_id, records, total_records], data_output_exchanges
+            [MsgType.EOF, client_id, records, total_records],
+            self.control_data_output_exchanges,
         )
         ack()
 
     def _consume_control_messages(self):
-        control_input_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, [f"{SUM_PREFIX}_{ID}"]
-        )
-        data_output_exchanges = build_data_output_exchanges()
-        control_input_exchange.start_consuming(
-            lambda message, ack, nack: self.process_control_message(
-                message, ack, data_output_exchanges
+        try:
+            if not self.sigterm_received:
+                self.control_input_exchange.start_consuming(
+                    self.process_control_message
+                )
+        except Exception as e:
+            logging.error(f"Control consumer stopped unexpectedly: {e}")
+        finally:
+            close_connections(
+                [self.control_input_exchange, *self.control_data_output_exchanges]
             )
-        )
+            self._stop_consuming(self.input_queue)
+
+    def _stop_consuming(self, connection):
+        try:
+            connection.stop_consuming()
+        except Exception as e:
+            logging.error(f"Error stopping consumption: {e}")
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("SIGTERM received")
+        self.sigterm_received = True
+        self._stop_consuming(self.input_queue)
 
     def start(self):
-        control_thread = threading.Thread(
-            target=self._consume_control_messages, daemon=True
-        )
-        control_thread.start()
-        self.input_queue.start_consuming(self.process_data_messsage)
+        self.control_thread.start()
+        try:
+            if not self.sigterm_received:
+                self.input_queue.start_consuming(self.process_data_messsage)
+        finally:
+            self.sigterm_received = True
+            while self.control_thread.is_alive():
+                self._stop_consuming(self.control_input_exchange)
+                self.control_thread.join(timeout=1)
+            close_connections(
+                [
+                    self.input_queue,
+                    self.control_output_exchange,
+                    *self.data_output_exchanges,
+                ]
+            )
+        logging.info("Sum stopped")
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
+    signal.signal(signal.SIGTERM, sum_filter.handle_sigterm)
     sum_filter.start()
     return 0
 
